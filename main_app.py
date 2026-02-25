@@ -75,10 +75,10 @@ input_df = st.sidebar.data_editor(
 target_market = st.sidebar.radio("📊 市場を選択", ("プライム", "スタンダード", "グロース"))
 
 # =========================
-# 5. スキャン実行
+# 5. ユーティリティ (修正版)
 # =========================
-
-# マスター読み込み
 @st.cache_data(ttl=3600)
 def load_master():
-    with urllib.request.urlopen(GITHUB_CSV
+    # ここがエラーの箇所です。変数名を正しく、閉じカッコを忘れずに！
+    with urllib.request.urlopen(GITHUB_CSV_RAW_URL) as resp:
+        return pd.read_csv(BytesIO(resp.read()))
