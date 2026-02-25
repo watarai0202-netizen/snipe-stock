@@ -1,0 +1,3 @@
+.streamlit/secrets.toml（パスワードを公開しないため）
+__pycache__/
+.DS_Store
