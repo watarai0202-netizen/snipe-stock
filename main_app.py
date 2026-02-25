@@ -32,7 +32,7 @@ if not st.session_state.auth:
 @st.cache_data(ttl=3600)
 def load_master():
     try:
-        url = "https://raw.githubusercontent.com/watarai0202-netizen/stocktest-app-1/main/data_j.csv"
+        url = "https://raw.githubusercontent.com/watarai0202-netizen/snipe-stock/blob/main/data/margin_data.csv"
         with urllib.request.urlopen(url) as resp:
             content = resp.read()
             if not content: return pd.DataFrame() # 空なら空のDFを返す
