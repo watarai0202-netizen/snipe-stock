@@ -35,7 +35,7 @@ if not st.session_state.auth:
 # 2. GitHub API 設定
 # =========================
 # ★ご自身のリポジトリ名に変更してください
-REPO = "watarai0202-netizen/stocktest-app-1" 
+REPO = "watarai0202-netizen/snipe-stock" 
 FILE_PATH = "data/margin_data.csv"
 API_URL = f"https://api.github.com/repos/{REPO}/contents/{FILE_PATH}"
 
