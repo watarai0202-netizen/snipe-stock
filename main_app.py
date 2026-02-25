@@ -3,16 +3,15 @@ import pandas as pd
 import yfinance as yf
 import urllib.request
 from io import BytesIO
+import re
 
 # =========================
-# 1. アプリ基本設定 & 認証
+# 1. アプリ設定 & 認証
 # =========================
-st.set_page_config(page_title="Pre-Market Sniper V2.1", layout="wide")
+st.set_page_config(page_title="Sniper V3.1 - Easy Paste", layout="wide")
 MY_PASSWORD = "stock testa"
 
-if "auth" not in st.session_state:
-    st.session_state.auth = False
-# Step 1の結果を保持するためのセッション状態
+if "auth" not in st.session_state: st.session_state.auth = False
 if "candidates_df" not in st.session_state:
     st.session_state.candidates_df = pd.DataFrame(columns=["コード", "信用買増", "信用売増", "現物差"])
 
@@ -25,138 +24,118 @@ if not st.session_state.auth:
     st.stop()
 
 # =========================
-# 2. 定数 & ユーティリティ
+# 2. 需給解析エンジン
 # =========================
-GITHUB_CSV_RAW_URL = "https://raw.githubusercontent.com/watarai0202-netizen/stocktest-app-1/main/data_j.csv"
+
+def parse_matsui_paste(text):
+    """
+    ユーザーが提示したコピペ形式を解析する
+    例: "1,043,600株買越し / 613,500株 買残減 / 430,100株売残"
+    """
+    try:
+        def to_num(s): return int(s.replace(',', '').replace('株', '').strip())
+        
+        # 数値とキーワードの組み合わせを抽出
+        res = {"買残": 0, "売残": 0, "現物": 0}
+        
+        # 現物: 「買越し」ならプラス、「売越し」ならマイナス
+        p = re.search(r'([\d,]+)株\s*(買越し|売越し)', text)
+        if p: res["現物"] = to_num(p.group(1)) * (1 if "買越し" in p.group(2) else -1)
+        
+        # 信用買残: 「買残増」ならプラス、「買残減」ならマイナス
+        b = re.search(r'([\d,]+)株\s*(買残増|買残減)', text)
+        if b: res["買残"] = to_num(b.group(1)) * (1 if "買残増" in b.group(2) else -1)
+        
+        # 信用売残: 「売残増」ならプラス、「売残減」ならマイナス
+        # ※「売残」だけでも「増」とみなす（ユーザーのコピペ例に対応）
+        s = re.search(r'([\d,]+)株\s*(売残増|売残減|売残)', text)
+        if s: res["売残"] = to_num(s.group(1)) * (-1 if "売残減" in s.group(3) else 1)
+        
+        return res
+    except:
+        return None
+
+# =========================
+# 3. スキャン & 先物ロジック
+# =========================
 
 @st.cache_data(ttl=3600)
 def load_master():
-    """GitHubから銘柄マスタを読み込む"""
-    with urllib.request.urlopen(GITHUB_CSV_RAW_URL) as resp:
+    with urllib.request.urlopen("https://raw.githubusercontent.com/watarai0202-netizen/stocktest-app-1/main/data_j.csv") as resp:
         return pd.read_csv(BytesIO(resp.read()))
 
-def analyze_futures_trend():
-    """8:30時点の先物トレンド（V字/L字）を判定"""
+def get_futures():
     try:
-        df_f = yf.download("NIY=F", period="1d", interval="5m", progress=False)
-        if df_f.empty: return "データ無", 1.0, 0
-        high, low, curr = df_f['High'].max(), df_f['Low'].min(), df_f['Close'].iloc[-1]
-        drop = high - low
-        recovery = curr - low
-        rate = recovery / drop if drop > 0 else 0
-        # 戻し率による判定基準
-        if rate >= 0.6: return "🔥V字回復 (強気)", 1.0, rate
-        if rate <= 0.3: return "⚠️L字停滞 (指値下げ推奨)", 0.985, rate
-        return "⚖️通常", 0.995, rate
-    except: return "取得エラー", 1.0, 0
+        df = yf.download("NIY=F", period="1d", interval="5m", progress=False)
+        h, l, c = df['High'].max(), df['Low'].min(), df['Close'].iloc[-1]
+        rate = (c - l) / (h - l) if (h - l) > 0 else 0
+        if rate >= 0.6: return "🔥V字", 1.0
+        if rate <= 0.3: return "⚠️L字", 0.985
+        return "⚖️通常", 0.995
+    except: return "不明", 1.0
 
 # =========================
-# 3. Step 1: 候補銘柄の自動抽出 (売買代金上位20)
+# 4. メイン UI
 # =========================
-st.title("🎯 Pre-Market Sniper")
+st.title("🎯 Pre-Market Sniper V3.1")
 
-st.sidebar.title("⚙️ 設定")
-target_market = st.sidebar.radio("📊 市場を選択", ("プライム", "スタンダード", "グロース"))
-top_n = st.sidebar.slider("📈 抽出上限（売買代金順）", 5, 50, 20)
-st.sidebar.markdown("---")
+# --- Step 1 ---
+st.sidebar.subheader("🔍 Step 1")
+market = st.sidebar.radio("市場", ("プライム", "スタンダード", "グロース"))
+if st.sidebar.button("上位20銘柄を抽出"):
+    master = load_master()
+    m_key = f"{market}（内国株式）"
+    ts = [f"{str(c).strip().replace('.0','')}.T" for c in master[master["市場・商品区分"] == m_key]["コード"]]
+    found = []
+    status = st.empty()
+    for i in range(0, len(ts), 50):
+        status.text(f"スキャン中... {i}/{len(ts)}")
+        df_p = yf.download(ts[i:i+50], period="1mo", interval="1d", group_by="ticker", progress=False)
+        for t in ts[i:i+50]:
+            try:
+                d = df_p[t].dropna()
+                rvol = d["Volume"].iloc[-1] / d["Volume"].iloc[-6:-1].mean()
+                if 1.15 <= rvol <= 1.6 and d["Close"].iloc[-1] >= d["High"].iloc[-11:-1].max():
+                    found.append({"コード": t.replace(".T", ""), "val": d["Close"].iloc[-1] * d["Volume"].iloc[-1]})
+            except: continue
+    status.empty()
+    top20 = sorted(found, key=lambda x: x["val"], reverse=True)[:20]
+    st.session_state.candidates_df = pd.DataFrame([{"コード": c["コード"], "信用買増": 0, "信用売増": 0, "現物差": 0} for c in top20])
+    st.success("抽出完了。Step 2へ。")
 
-if st.sidebar.button("🔍 Step 1: スクリーニング開始", type="primary"):
-    df_master = load_master()
-    market_key = f"{target_market}（内国株式）"
-    tickers = [f"{str(c).strip().replace('.0','')}.T" for c in df_master[df_master["市場・商品区分"] == market_key]["コード"]]
+# --- Step 2: コピペ入力エリア ---
+st.subheader("📝 Step 2: 需給コピペ入力")
+if not st.session_state.candidates_df.empty:
+    col_input, col_table = st.columns([1, 2])
     
-    candidate_list = []
-    status_area = st.empty()
-    batch_size = 50
-    
-    for i in range(0, len(tickers), batch_size):
-        batch = tickers[i:i+batch_size]
-        status_area.text(f"スキャン中... {i}/{len(tickers)}")
-        try:
-            # 1ヶ月分の日足を一括取得
-            df_p = yf.download(batch, period="1mo", interval="1d", group_by="ticker", progress=False)
-            for t in batch:
-                if t not in df_p.columns.levels[0]: continue
-                data = df_p[t].dropna()
-                if len(data) < 15: continue
-                
-                # 条件判定: RVOL (1.15-1.6x) & 10日高値ブレイク
-                vol_yest = data["Volume"].iloc[-1]
-                close_yest = data["Close"].iloc[-1]
-                avg_vol5 = data["Volume"].iloc[-6:-1].mean()
-                rvol = vol_yest / avg_vol5
-                
-                high_10d = data["High"].iloc[-11:-1].max()
-                
-                if 1.15 <= rvol <= 1.6 and close_yest >= high_10d:
-                    # 売買代金を算出
-                    t_value = close_yest * vol_yest
-                    candidate_list.append({"コード": t.replace(".T", ""), "売買代金": t_value})
-        except: continue
-    
-    status_area.empty()
-    # 売買代金順にソートして上位N件に絞り込み
-    sorted_list = sorted(candidate_list, key=lambda x: x["売買代金"], reverse=True)[:top_n]
-    
-    # セッション状態を更新し、入力シートへ反映
-    st.session_state.candidates_df = pd.DataFrame([
-        {"コード": c["コード"], "信用買増": 0, "信用売増": 0, "現物差": 0} for c in sorted_list
-    ])
-    st.success(f"売買代金上位 {len(sorted_list)} 銘柄を抽出しました。Step 2へ進んでください。")
-
-# =========================
-# 4. Step 2: 需給データ入力
-# =========================
-st.subheader("📝 Step 2: 松井証券 需給データ入力")
-st.caption("Step 1の結果が自動反映されます。数値を入力してください。")
-
-edited_df = st.data_editor(
-    st.session_state.candidates_df,
-    num_rows="dynamic",
-    key="margin_editor",
-    use_container_width=True
-)
-
-# =========================
-# 5. Step 3: 最終スナイパー実行 (8:50目安)
-# =========================
-if st.button("🚀 Step 3: 理想指値を算出", type="secondary"):
-    if edited_df.empty:
-        st.warning("候補銘柄がありません。先にStep 1を実行してください。")
-    else:
-        # 先物トレンドを取得
-        f_status, f_adj, f_rate = analyze_futures_trend()
-        st.info(f"**【先物判定】** {f_status} (戻し率: {f_rate:.1%})")
+    with col_input:
+        target_code = st.selectbox("対象銘柄を選択", st.session_state.candidates_df["コード"])
+        paste_area = st.text_area("ここに松井証券のテキストを貼り付け", height=150)
         
-        final_results = []
-        target_tickers = [f"{c}.T" for c in edited_df["コード"]]
-        
-        # 5MA算出用の最新日足取得
-        df_final = yf.download(target_tickers, period="5d", interval="1d", group_by="ticker", progress=False)
-        
-        for _, row in edited_df.iterrows():
-            t = f"{row['コード']}.T"
-            if t not in df_final.columns.levels[0]: continue
-            data = df_final[t].dropna()
-            
-            # 5MAの計算
-            ma5 = data["Close"].tail(5).mean()
-            
-            # 需給スコアの計算
-            s_score = 0
-            if row['信用売増'] > row['信用買増']: s_score += 15
-            if row['信用買増'] > 50000: s_score -= 15
-            
-            # 理想指値の計算（先物調整を反映）
-            target_price = ma5 * f_adj
-            
-            final_results.append({
-                "コード": row['コード'],
-                "5MA位置": f"{ma5:,.0f}",
-                "需給スコア": s_score,
-                "理想指値": f"{target_price:,.0f}",
-                "判定": "🎯狙撃" if s_score >= 0 else "慎重"
-            })
-            
-        if final_results:
-            st.table(pd.DataFrame(final_results))
+        if st.button("反映する"):
+            parsed = parse_matsui_paste(paste_area)
+            if parsed:
+                idx = st.session_state.candidates_df[st.session_state.candidates_df["コード"] == target_code].index
+                st.session_state.candidates_df.loc[idx, ["信用買増", "信用売増", "現物差"]] = [parsed["買残"], parsed["売残"], parsed["現物"]]
+                st.toast(f"{target_code} のデータを更新しました！")
+            else:
+                st.error("解析できませんでした。形式を確認してください。")
+
+    with col_table:
+        edited_df = st.data_editor(st.session_state.candidates_df, use_container_width=True, key="editor")
+
+# --- Step 3 ---
+if st.button("🚀 Step 3: 指値算出"):
+    f_stat, f_adj = get_futures()
+    st.info(f"先物判定: {f_stat}")
+    t_ticks = [f"{c}.T" for c in edited_df["コード"]]
+    df_f = yf.download(t_ticks, period="5d", interval="1d", group_by="ticker", progress=False)
+    final = []
+    for _, row in edited_df.iterrows():
+        t = f"{row['コード']}.T"
+        if t not in df_f.columns.levels[0]: continue
+        ma5 = df_f[t]["Close"].dropna().tail(5).mean()
+        # 需給スコア
+        score = (15 if row['信用売増'] > row['信用買増'] else 0) + (5 if row['現物差'] > 0 else 0) - (15 if row['信用買増'] > 50000 else 0)
+        final.append({"コード": row['コード'], "5MA": f"{ma5:,.0f}", "理想指値": f"{ma5 * f_adj:,.0f}", "判定": "🎯狙撃" if score >= 15 else "慎重"})
+    st.table(pd.DataFrame(final))
